@@ -1,0 +1,385 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+
+@author: xuzhenghao
+"""
+##################################################################
+#  1．引入头文件,定义文件提取函数，提取肺结节数据
+##################################################################
+import numpy as np
+import tensorflow as tf
+import matplotlib.pyplot as plt
+from scipy.stats import norm
+import scipy.io as sio
+import os
+import tensorflow.contrib.slim as slim
+os.environ['TF_FORCE_GPU_ALLOW_GROWTH'] = 'true'
+import random
+import pprint
+datadir = '/home/featurize/data'
+
+def normalize_x(x, lower = -500, upper = 1500.0):
+    x = np.squeeze(x) # remove depth/
+    x = (x - lower) / (upper - lower)
+    x[x<0.0] = 0.0
+    x[x>1.0] = 1.0
+    return x
+
+def load_lidc(data_dir,is_train, one_hot):        
+    if(is_train):
+        fd = sio.loadmat(os.path.join(data_dir,'trdata.mat'))
+        picture = fd['picture']
+        trX = picture.reshape(picture.shape[0],64,64).astype(np.float)#trX为训练数据集的图片  10127张        
+        trX = normalize_x(trX,-500,1500)
+
+        labels = np.round(fd['label'])
+        trY = labels.reshape((labels.shape[1])).astype(np.float)#trY为训练数据集的标签  10360张             
+        trY = np.asarray(trY).astype(np.int) #np.asarray 将列表转换为数组
+    
+        X=trX
+        y=trY
+    else:
+        fd = sio.loadmat(os.path.join(data_dir,'tedata.mat'))
+        picture = fd['picture']
+        teX = picture.reshape(picture.shape[0],64,64).astype(np.float) #teX为测试数据集的图片  4343张
+        teX = normalize_x(teX,-500,1500)
+        labels = np.round(fd['label'])        
+        teY = labels.reshape((labels.shape[1])).astype(np.float)                                      
+        teY = np.asarray(teY).astype(np.int)#np.asarray 将列表转换为数组
+        
+        X=teX
+        y=teY
+    
+    seed = 547         
+    np.random.seed(seed)
+    np.random.shuffle(X)
+    np.random.seed(seed)
+    np.random.shuffle(y)
+    if (one_hot): 
+        y_vec = np.zeros((len(y), 5), dtype=np.float)
+        for i,label in enumerate(y):
+            y_vec[i,y[i]]=1.0
+        return X,y_vec
+    else:
+        return X,y
+tf.reset_default_graph()  # 用于清除默认图形堆栈并重置全局默认图形
+##################################################################
+#  2.定义卷积反卷积全连接等基础函数
+##################################################################
+def print_layer(t):
+    return(print(t.op.name, ' ', t.get_shape().as_list(), '\n'))
+   
+
+def leaky_relu(x,name='leaky_relu'):
+    with tf.variable_scope(name):
+        out = tf.where(tf.greater(x, 0), x, 0.01 * x)
+    return out
+    
+
+def conv(x, d_out, name ,net,act=leaky_relu):
+    d_in = x.get_shape()[-1].value
+    reuse = tf.AUTO_REUSE
+    with tf.variable_scope(name,reuse = reuse) as scope:
+        if net == 'linear':
+            kernel = tf.get_variable('weights',[4,4,d_in,d_out],initializer=tf.truncated_normal_initializer(stddev=0.1))
+            bias = tf.get_variable('bias',[d_out],initializer=tf.constant_initializer(0.0))
+            conv = tf.nn.conv2d(x, kernel,[1, 2, 2, 1], padding='SAME')
+            if act == None:
+                activation = tf.nn.bias_add(conv,bias)
+            else:
+                activation = act(tf.nn.bias_add(conv,bias), name=scope)
+                
+        elif net == 'quad':
+            kernel_r = tf.get_variable('weights_r',[4,4,d_in,d_out],initializer=tf.truncated_normal_initializer(stddev=0.1))
+            kernel_g = tf.get_variable('weights_g',[4,4,d_in,d_out],initializer=tf.constant_initializer(0.0))
+            kernel_b = tf.get_variable('weights_b',[4,4,d_in,d_out],initializer=tf.constant_initializer(0.0))
+            
+            bias_r = tf.get_variable('bias_r', [d_out], initializer=tf.constant_initializer(-0.03))
+            bias_g = tf.get_variable('bias_g', [d_out], initializer=tf.constant_initializer(1.0))
+            c      = tf.get_variable(  'c'   , [d_out], initializer=tf.constant_initializer(0.0))
+            
+            conv_r = tf.nn.conv2d( x , kernel_r,[1, 2, 2, 1], padding='SAME')
+            conv_g = tf.nn.conv2d( x , kernel_g,[1, 2, 2, 1], padding='SAME')
+            conv_b = tf.nn.conv2d(x*x, kernel_b,[1, 2, 2, 1], padding='SAME')
+            conv   = (conv_r + bias_r)*(conv_g + bias_g) + conv_b
+            if act == None:
+                activation = tf.nn.bias_add(conv,c)
+            else:
+                activation = act(tf.nn.bias_add(conv,c), name=scope)
+        print_layer(activation)
+        print('__conv__')
+        return activation
+    
+    
+def deconv(x,output_shape,name,net,act = None):
+    d_in = x.get_shape()[-1].value
+    d_out = output_shape[-1]
+    reuse = tf.AUTO_REUSE
+    with tf.variable_scope(name,reuse = reuse) as scope:
+        if net == 'linear':
+            kernel = tf.get_variable('weights',[4,4,d_out,d_in],initializer=tf.truncated_normal_initializer(stddev=0.1))
+            bias = tf.get_variable('bias', [d_out], initializer=tf.constant_initializer(0.0))
+            conv = tf.nn.conv2d_transpose(x,kernel,output_shape,[1,2,2,1], padding = 'SAME')
+            if act == None:
+                activation = tf.nn.bias_add(conv,bias)
+            else:
+                activation = act(tf.nn.bias_add(conv,bias))
+                
+        elif net == 'quad':
+            kernel_r = tf.get_variable('weights_r',[4,4,d_out,d_in],initializer=tf.truncated_normal_initializer(stddev=0.1))
+            kernel_g = tf.get_variable('weights_g',[4,4,d_out,d_in],initializer=tf.constant_initializer(0.0))
+            kernel_b = tf.get_variable('weights_b',[4,4,d_out,d_in],initializer=tf.constant_initializer(0.0))
+            
+            bias_r = tf.get_variable('bias_r', [d_out], initializer=tf.constant_initializer(0.03))
+            bias_g = tf.get_variable('bias_g', [d_out], initializer=tf.constant_initializer(1.0))
+            c      = tf.get_variable('c', [d_out], initializer=tf.constant_initializer(0.0))
+            
+            conv_r = tf.nn.conv2d_transpose(x,kernel_r,output_shape,[1,2,2,1], padding = 'SAME')
+            conv_g = tf.nn.conv2d_transpose(x,kernel_g,output_shape,[1,2,2,1], padding = 'SAME')
+            conv_b = tf.nn.conv2d_transpose(x,kernel_b,output_shape,[1,2,2,1], padding = 'SAME')
+            
+            conv   = (conv_r + bias_r)*(conv_g + bias_g) + conv_b
+            if act == None:
+                activation = tf.nn.bias_add(conv,c)
+            else:
+                activation = act(tf.nn.bias_add(conv,c))
+        print_layer(activation)
+        print('__deconv__')
+        return activation           
+    
+
+    
+def fc(x, n_out, name,net,act = tf.nn.relu):
+    n_in = x.get_shape()[-1].value
+    #regularizer = tf.contrib.layers.l2_regularizer(0.01)
+    reuse = tf.AUTO_REUSE
+    with tf.variable_scope(name, reuse=reuse) as scope:
+        if net == 'linear':
+            weight = tf.get_variable('weights', [n_in, n_out], tf.float32, tf.truncated_normal_initializer(stddev=0.01))
+            bias = tf.get_variable('bias', [n_out], initializer=tf.constant_initializer(1.0))
+            if act == None:
+                activation = tf.nn.bias_add(tf.matmul(x,weight),bias)
+            else:
+                activation = act(tf.nn.bias_add(tf.matmul(x,weight),bias))
+            #regularization = regularizer(weight)
+        elif net == 'quad':
+            weight_r = tf.get_variable('weights_r', shape=[n_in, n_out],dtype=tf.float32,initializer=tf.contrib.layers.xavier_initializer_conv2d())
+            weight_g = tf.Variable(tf.zeros([n_in, n_out],tf.float32), name='weights_g')
+            weight_b = tf.Variable(tf.zeros([n_in, n_out],tf.float32), name='weights_b')
+            
+            bias_r = tf.Variable(tf.constant(-0.03, dtype=tf.float32, shape=[n_out]),name='bias_r')
+            bias_g = tf.Variable(tf.constant(1.0, dtype=tf.float32, shape=[n_out]),name='bias_g')
+            c      = tf.Variable(tf.constant(0.0, dtype=tf.float32, shape=[n_out]),name='c')
+            
+            conv_r = tf.matmul(x, weight_r) + bias_r
+            conv_g = tf.matmul(x, weight_g) + bias_g
+            conv_b = tf.matmul(x*x, weight_b) 
+            if act == None:
+                activation = conv_r*conv_g + conv_b + c
+            else:
+                activation = act(conv_r*conv_g + conv_b + c, name=scope)
+            #regularization = regularizer(weight_r) + regularizer(weight_g) + regularizer(weight_b)
+        print_layer(activation)
+        #tf.add_to_collection("losses", regularization)
+        print('__fc__')
+        return activation
+    
+def showpic():
+    test_x, test_y = load_lidc(datadir,is_train=False, one_hot=False)
+    show_num = 10
+    rand = random.randint(0,int(len(test_x)/batch_size))
+    batch_xs = test_x[rand*batch_size:(rand+1)*batch_size]
+    batch_ys = test_y[rand*batch_size:(rand+1)*batch_size]
+
+    gensimple, d_class, inputx, inputy = sess.run(
+        [genout, pred_class, x, y], feed_dict={x: batch_xs, y: batch_ys})
+
+    f, a = plt.subplots(2, 10, figsize=(10, 2))  # figure 1000*20 , 分为10张子图
+    for i in range(show_num):
+        a[0][i].imshow(np.reshape(inputx[i], (64,64)))
+        a[1][i].imshow(np.reshape(gensimple[i], (64,64)))
+        print("d_class", d_class[i], "inputy", inputy[i])  # 输出 判决预测种类/真实输入种类/隐藏信息
+
+    plt.draw()
+    plt.show()
+
+        
+##################################################################
+#  3．定义生成器与判别器
+##################################################################
+def generator(x): 
+    reuse=tf.AUTO_REUSE
+    with tf.variable_scope('generator',reuse=reuse):
+        x = fc(x, 1024,'fc1','linear')
+        x = slim.batch_norm(x, activation_fn=tf.nn.relu)
+        x = fc(x, 8*8*256,'fc2','linear')
+        x = slim.batch_norm(x, activation_fn=tf.nn.relu)
+        x = tf.reshape(x, [-1, 8, 8, 256])
+        shape = x.get_shape().as_list()
+        x = deconv(x,[shape[0],16,16,128],'deconv1','linear')
+        x = slim.batch_norm(x, activation_fn=tf.nn.relu)
+        x = deconv(x,[shape[0],32,32,64],'deconv2','linear')
+        x = slim.batch_norm(x, activation_fn=tf.nn.relu)
+        x = deconv(x,[shape[0],64,64,1],'deconv3','linear',act=tf.nn.sigmoid)
+    return x
+
+
+
+def discriminator(x, num_classes=5):  # 判别器函数 : 两次卷积，再接两次全连接
+    reuse = len([t for t in tf.global_variables() if t.name.startswith('discriminator')]) > 0
+    # print (reuse)
+    # print (x.get_shape())
+    with tf.variable_scope('discriminator', reuse=reuse):
+        x = tf.reshape(x, shape=[-1, 64, 64, 1])
+        x = conv(x, 64, 'conv1' ,'linear')
+        x = conv(x, 128, 'conv2' ,'linear')
+        x = conv(x, 256, 'conv3' ,'linear')
+        x = tf.layers.flatten(x)
+        shared_tensor = fc(x, 1024,'shared_tensor','linear')
+        recog_shared = fc(shared_tensor, 128,'recog_shared','linear')
+
+        disc = fc(shared_tensor,1,'disc','linear',act = None)
+        disc = tf.squeeze(disc, -1)
+        recog_cat = fc(recog_shared, num_classes,'recog_cat','linear',act=None)
+    return disc, recog_cat
+      
+##################################################################
+#  4．定义网络模型 : 定义 参数/输入/输出/中间过程(经过G/D)的输入输出
+##################################################################
+batch_size = 10   # 获取样本的批次大小10
+classes_dim = 5  # 5 classes
+rand_dim = 45     # 一般噪声的维度, 应节点为z_rand, 符合标准高斯分布的随机数。
+input_x = 64
+input_y = 64    # 64*64
+log_dir = '/home/featurize/work/acganlogdir'
+
+x = tf.placeholder(tf.float32, [None, input_x , input_y])     # x为输入真实图片images
+y = tf.placeholder(tf.int64, [None])                # y为真实标签labels
+
+X = tf.reshape(x,[-1,64,64,1])
+tf.summary.image('x',X,1)
+
+#z_con = tf.random_normal((batch_size, con_dim))  # 2列
+z_rand = tf.random_normal((batch_size, rand_dim))  # 45列
+z = tf.concat(axis=1, values=[tf.one_hot(y, depth=classes_dim), z_rand])  # 50列 shape = (10, 50)
+gen = generator(z)  # shape = (10, 64,64, 1)
+genout= tf.squeeze(gen, -1)  # shape = (10, 64,64)
+
+tf.summary.image('pic',gen,1)
+
+# labels for discriminator
+y_real = tf.ones(batch_size)  # 真
+y_fake = tf.zeros(batch_size)  # 假
+
+# 判别器
+disc_real, class_real= discriminator(x)
+disc_fake, class_fake= discriminator(gen)
+pred_class = tf.argmax(class_fake, dimension=1)
+
+
+##################################################################
+#  4．定义损失函数和优化器
+##################################################################
+# 判别器 loss
+loss_d_r = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(logits=disc_real, labels=y_real))
+loss_d_f = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(logits=disc_fake, labels=y_fake))
+loss_d = (loss_d_r + loss_d_f) / 2
+# print ('loss_d', loss_d.get_shape())
+
+# 生成器 loss
+loss_g = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(logits=disc_fake, labels=y_real))
+
+# categorical factor loss 分类因素损失
+loss_cf = tf.reduce_mean(tf.nn.sparse_softmax_cross_entropy_with_logits(logits=class_fake, labels=y))
+loss_cr = tf.reduce_mean(tf.nn.sparse_softmax_cross_entropy_with_logits(logits=class_real, labels=y))
+loss_c = (loss_cf + loss_cr) / 2
+correct_pred = tf.equal(tf.argmax(class_real,1),y)
+fake_pred = tf.equal(tf.argmax(class_fake,1),y)
+accuracy = tf.reduce_mean(tf.cast(correct_pred,tf.float32))
+fake_accuracy = tf.reduce_mean(tf.cast(fake_pred,tf.float32))
+
+
+
+
+    
+    
+    
+
+
+
+# 获得各个网络中各自的训练参数列表
+t_vars = tf.trainable_variables()
+d_vars = [var for var in t_vars if 'discriminator' in var.name]
+g_vars = [var for var in t_vars if 'generator' in var.name]
+
+# 优化器
+disc_global_step = tf.Variable(0, trainable=False)
+gen_global_step = tf.Variable(0, trainable=False)
+
+train_disc = tf.train.AdamOptimizer(0.0001).minimize(loss_d + loss_c , var_list=d_vars, global_step=disc_global_step)
+train_gen = tf.train.AdamOptimizer(0.001).minimize(loss_g + loss_c , var_list=g_vars, global_step=gen_global_step)
+
+
+tf.summary.scalar('loss_df',loss_d_f)
+tf.summary.scalar('loss_dr',loss_d_r)
+tf.summary.scalar('loss_d',loss_d)
+tf.summary.scalar('loss_g',loss_g)
+tf.summary.scalar('loss_cf',loss_cf)
+tf.summary.scalar('loss_cr',loss_cr)
+tf.summary.scalar('loss_c',loss_c)
+tf.summary.scalar('acc_r',accuracy)
+tf.summary.scalar('acc_f',fake_accuracy)
+merged_summary_op = tf.summary.merge_all()
+
+summary_writer = tf.summary.FileWriter(log_dir,graph=tf.get_default_graph())
+
+
+##################################################################
+#  5．训练与测试
+#  建立session，循环中使用run来运行两个优化器
+##################################################################
+training_epochs = 10
+display_step = 50
+
+config = tf.ConfigProto()
+config.gpu_options.per_process_gpu_memory_fraction = 0.4
+
+data_x, data_y = load_lidc(datadir,is_train=True, one_hot=False)
+test_x, test_y = load_lidc(datadir,is_train=False, one_hot=False)
+with tf.Session(config=config) as sess:
+    sess.run(tf.global_variables_initializer())
+    
+    for epoch in range(training_epochs):
+        avg_cost = 0.
+        total_batch = int(len(data_x)/batch_size)  # 5500
+        # 遍历全部数据集
+        for i in range(0,total_batch):
+
+            batch_xs = data_x[i*batch_size:(i+1)*batch_size]
+            batch_ys = data_y[i*batch_size:(i+1)*batch_size]
+
+            feeds = {x: batch_xs, y: batch_ys}
+
+            
+            # Fit training using batch data
+            # 输入数据，运行优化器
+            l_disc, _, l_d_step = sess.run([loss_d, train_disc, disc_global_step], feeds)
+            l_gen, _, l_g_step = sess.run([loss_g, train_gen, gen_global_step], feeds)
+            #tf.summary.image('x',x,1)
+            if i % display_step == 0:
+                summary = sess.run(merged_summary_op,feeds)
+                summary_writer.add_summary(summary,total_batch*epoch+i)
+                print("Epoch:", '%04d' % (epoch + 1),"batch:", '%04d' % (i), "cost=", "{:.9f} ".format(l_disc), l_gen)
+        showpic()
+        # 显示训练中的详细信息
+       # if epoch % display_step == 0:
+         #   print("Epoch:", '%04d' % (epoch + 1), "cost=", "{:.9f} ".format(l_disc), l_gen)
+
+    print("完成!")
+    
+    # 测试
+    print("Result: loss_d = ", loss_d.eval({x: data_x[:batch_size], y: data_y[:batch_size]}),
+          "\n        loss_g = ", loss_g.eval({x: data_x[:batch_size], y: data_y[:batch_size]}))
+
+    showpic()

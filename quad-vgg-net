@@ -1,0 +1,363 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+
+@author: xuzhenghao
+"""
+
+
+import os
+os.environ['TF_FORCE_GPU_ALLOW_GROWTH'] = 'true'
+import tensorflow as tf
+
+import pickle
+import numpy as np
+import scipy.io as sio
+import time
+from datetime import datetime
+import random
+tf.reset_default_graph() 
+
+batch_size = 128
+lr = 0.0001
+n_cls = 10
+max_steps = 30
+display_step = 10
+test_steps = 10
+
+def normalize_x(x, lower = -500, upper = 1500.0):
+    x = np.squeeze(x) # remove depth/
+    x = (x - lower) / (upper - lower)
+    x[x<0.0] = 0.0
+    x[x>1.0] = 1.0
+    x = np.expand_dims(x,3)
+    return x
+
+def load_lidc(data_dir,is_train, one_hot):
+    if(is_train):
+        fd = sio.loadmat(os.path.join(data_dir,'trdata.mat'))
+        picture = fd['picture']
+        trX = picture.reshape(picture.shape[0],64,64).astype(np.float)  
+        trX = normalize_x(trX,-500,1500)
+        labels = np.round(fd['label'])
+        trY = labels.reshape((labels.shape[1])).astype(np.float)          
+        trY = np.asarray(trY).astype(np.int)
+        X=trX
+        y=trY
+    else:
+        fd = sio.loadmat(os.path.join(data_dir,'tedata.mat'))
+        picture = fd['picture']
+        teX = picture.reshape(picture.shape[0],64,64).astype(np.float)	  #teX为测试数据集的图片  4343张
+        teX = normalize_x(teX,-500,1500)
+        labels = np.round(fd['label'])        
+        teY = labels.reshape((labels.shape[1])).astype(np.float)                                       
+        teY = np.asarray(teY).astype(np.int)#np.asarray 将列表转换为数组
+    
+        X=teX
+        y=teY
+    
+    seed = 547       
+    np.random.seed(seed)
+    np.random.shuffle(X)
+    np.random.seed(seed)
+    np.random.shuffle(y)
+    if (one_hot): 
+        y_vec = np.zeros((len(y), 5), dtype=np.float)
+        for i,label in enumerate(y):
+            y_vec[i,y[i]]=1.0
+        return X,y_vec
+    else:
+        return X,y
+
+def load_CIFAR_batch(filename):
+  """ load single batch of cifar """
+  with open(filename, 'rb') as f:
+    datadict = pickle.load(f,encoding='latin1')
+    X = datadict['data']
+    Y = datadict['labels']
+    X = X.reshape(10000, 3, 32,32).transpose(0,2,3,1).astype("float")
+    Y = np.array(Y)
+    yte = np.zeros((len(Y), 10), dtype=np.float)
+    for i,label in enumerate(Y):
+        yte[i,Y[i]]=1.0
+    return X, yte
+
+def load_CIFAR10(ROOT):
+    xs = []
+    ys = []
+    for b in range(1,6):
+        f = os.path.join(ROOT, 'data_batch_%d' % (b, ))
+        X, Y = load_CIFAR_batch(f)
+        xs.append(X)
+        ys.append(Y)
+    Xtr = np.concatenate(xs)#使变成行向量
+    Ytr = np.concatenate(ys)
+
+    del X, Y
+    Xte, Yte = load_CIFAR_batch(os.path.join(ROOT, 'test_batch'))
+    return Xtr, Ytr, Xte, Yte
+
+
+
+def print_layer(t):
+    print(t.op.name, ' ', t.get_shape().as_list(), '\n')
+
+
+def conv(x, d_out, name ,net):
+    regularizer = tf.contrib.layers.l2_regularizer(0.01)
+    d_in = x.get_shape()[-1].value
+    with tf.name_scope(name) as scope:
+        if net == 'linear':
+            kernel = tf.Variable(tf.truncated_normal([3, 3, d_in, d_out],dtype=tf.float32, stddev=0.1), name='weights')
+            bias = tf.Variable(tf.constant(0.0, dtype=tf.float32, shape=[d_out]),trainable=True, name='bias')
+            conv = tf.nn.conv2d(x, kernel,[1, 1, 1, 1], padding='SAME')
+            
+            activation = tf.nn.relu(tf.nn.bias_add(conv,bias), name=scope)
+            regularization = regularizer(kernel)
+        elif net == 'quad':
+            kernel_r = tf.Variable(tf.truncated_normal([3, 3, d_in, d_out], stddev=0.1), name='weights_r')
+            kernel_g = tf.Variable(tf.zeros([3, 3, d_in, d_out],tf.float32), name='weights_g')
+            kernel_b = tf.Variable(tf.zeros([3, 3, d_in, d_out],tf.float32), name='weights_b')
+            
+            bias_r = tf.Variable(tf.constant(-0.03, dtype=tf.float32, shape=[d_out]),name='bias_r')
+            bias_g = tf.Variable(tf.constant(1.0, dtype=tf.float32, shape=[d_out]),name='bias_g')
+            c      = tf.Variable(tf.constant(0.0, dtype=tf.float32, shape=[d_out]),name='c')
+            
+            conv_r = tf.nn.conv2d(x, kernel_r,[1, 1, 1, 1], padding='SAME')
+            conv_g = tf.nn.conv2d(x, kernel_g,[1, 1, 1, 1], padding='SAME')
+            conv_b = tf.nn.conv2d(x*x, kernel_b,[1, 1, 1, 1], padding='SAME')
+            conv   = (conv_r + bias_r)*(conv_g + bias_g) + conv_b 
+            
+            activation = tf.nn.relu(tf.nn.bias_add(conv,c), name=scope)
+            regularization = regularizer(kernel_r) + regularizer(kernel_g) + regularizer(kernel_b)
+            
+        print_layer(activation)
+        tf.add_to_collection("losses", regularization)
+        return activation
+
+
+
+def maxpool(x, name):
+    activation = tf.nn.max_pool(x, [1, 2, 2, 1], [1, 2, 2, 1], padding='VALID', name=name) 
+    print_layer(activation)
+    return activation
+
+
+def fc(x, n_out, name,net):
+    regularizer = tf.contrib.layers.l2_regularizer(0.01)
+    n_in = x.get_shape()[-1].value
+    with tf.name_scope(name) as scope:
+        if net == 'linear':
+            
+            weight = tf.Variable(tf.truncated_normal([n_in, n_out], stddev=0.01), name='weights')
+            bias = tf.Variable(tf.constant(1.0, dtype=tf.float32, shape=[n_out]),trainable=True,name='bias')
+
+            #activation = tf.nn.bias_add(tf.matmul(x,weight),bias)
+            activation = tf.nn.relu(tf.nn.bias_add(tf.matmul(x,weight),bias), name=scope)
+            regularization = regularizer(weight)
+        elif net == 'quad':
+            weight_r = tf.Variable(tf.truncated_normal([n_in, n_out], stddev=0.01), name='weights_r')
+            #weight_r = tf.get_variable(scope+'weights_r', shape=[n_in, n_out],dtype=tf.float32,initializer=tf.contrib.layers.xavier_initializer_conv2d())
+            weight_g = tf.Variable(tf.zeros([n_in, n_out],tf.float32), name='weights_g')
+            weight_b = tf.Variable(tf.zeros([n_in, n_out],tf.float32), name='weights_b')
+            
+            bias_r = tf.Variable(tf.constant(-0.03, dtype=tf.float32, shape=[n_out]),name='bias_r')
+            bias_g = tf.Variable(tf.constant(1.0, dtype=tf.float32, shape=[n_out]),name='bias_g')
+            c      = tf.Variable(tf.constant(0.0, dtype=tf.float32, shape=[n_out]),name='c')
+            
+            conv_r = tf.matmul(x, weight_r) + bias_r
+            conv_g = tf.matmul(x, weight_g) + bias_g
+            conv_b = tf.matmul(x*x, weight_b) 
+
+            activation = tf.nn.relu(conv_r*conv_g + conv_b + c, name=scope)
+            regularization = regularizer(weight_r) + regularizer(weight_g) + regularizer(weight_b)
+            
+        print_layer(activation)
+        tf.add_to_collection("losses", regularization)
+        return activation
+    
+def shortVGG16(images, n_cls, _dropout,filter=16):
+    conv1_1 = conv(images, filter, 'conv1_1','quad')
+    conv1_2 = conv(conv1_1, filter, 'conv1_2','quad')
+    pool1   = maxpool(conv1_2, 'pool1')
+
+    conv2_1 = conv(pool1, 2*filter, 'conv2_1','quad')
+    conv2_2 = conv(conv2_1, 2*filter, 'conv2_2','quad')
+    pool2   = maxpool(conv2_2, 'pool2')
+
+    conv3_1 = conv(pool2, 4*filter, 'conv3_1','linear')
+    conv3_2 = conv(conv3_1, 4*filter, 'conv3_2','linear')
+    conv3_3 = conv(conv3_2, 4*filter, 'conv3_3','linear')
+    pool3   = maxpool(conv3_3, 'pool3')
+
+    #输入图像是64*64，因此此处打平为4*4
+    shape = int(np.prod(pool3.get_shape()[1:]))
+    flatten  = tf.reshape(pool3, [-1, shape])  
+    fc4      = fc(flatten, 8*filter, 'fc4','linear')
+    dropout = tf.nn.dropout(fc4, _dropout)
+
+    fc5      = fc(dropout, n_cls, 'fc5','linear')
+
+    return fc5
+
+def VGG16(images, n_cls, _dropout,filter=16):
+    conv1_1 = conv(images, filter, 'conv1_1','quad')
+    conv1_2 = conv(conv1_1, filter, 'conv1_2','linear')
+    pool1   = maxpool(conv1_2, 'pool1')
+
+    conv2_1 = conv(pool1, 2*filter, 'conv2_1','quad')
+    conv2_2 = conv(conv2_1, 2*filter, 'conv2_2','linear')
+    pool2   = maxpool(conv2_2, 'pool2')
+
+    conv3_1 = conv(pool2, 4*filter, 'conv3_1','quad')
+    conv3_2 = conv(conv3_1, 4*filter, 'conv3_2','linear')
+    conv3_3 = conv(conv3_2, 4*filter, 'conv3_3','linear')
+    pool3   = maxpool(conv3_3, 'pool3')
+
+    conv4_1 = conv(pool3, 8*filter, 'conv4_1','quad')
+    conv4_2 = conv(conv4_1, 8*filter, 'conv4_2','linear')
+    conv4_3 = conv(conv4_2, 8*filter, 'conv4_3','linear')
+    pool4   = maxpool(conv4_3, 'pool4')
+
+    conv5_1 = conv(pool4, 16*filter, 'conv5_1','linear')
+    conv5_2 = conv(conv5_1, 16*filter, 'conv5_2','linear')
+    conv5_3 = conv(conv5_2, 16*filter, 'conv5_3','linear')
+    pool5   = maxpool(conv5_3, 'pool5')
+
+    #输入图像是64*64，因此此处打平为4*4
+    shape = int(np.prod(pool5.get_shape()[1:]))
+    flatten  = tf.reshape(pool5, [-1, shape])  
+    fc6      = fc(flatten, 32*filter, 'fc6','linear')
+    dropout1 = tf.nn.dropout(fc6, _dropout)
+
+    fc7      = fc(dropout1, 32*filter, 'fc7','linear')
+    dropout2 = tf.nn.dropout(fc7, _dropout)
+    
+    fc8      = fc(dropout2, n_cls, 'fc8','linear')
+
+    return fc8
+
+
+def QUVGG16(images, n_cls, drop,filter=16):
+
+    conv1_1 = conv(images, filter, 'conv1_1','quad')
+    conv1_2 = conv(conv1_1, filter, 'conv1_2','quad')
+    pool1   = maxpool(conv1_2, 'pool1')
+
+    conv2_1 = conv(pool1, 2*filter, 'conv2_1','quad')
+    conv2_2 = conv(conv2_1, 2*filter, 'conv2_2','quad')
+    pool2   = maxpool(conv2_2, 'pool2')
+
+    conv3_1 = conv(pool2, 4*filter, 'conv3_1','quad')
+    conv3_2 = conv(conv3_1, 4*filter, 'conv3_2','quad')
+    conv3_3 = conv(conv3_2, 4*filter, 'conv3_3','quad')
+    pool3   = maxpool(conv3_3, 'pool3')
+
+    conv4_1 = conv(pool3, 8*filter, 'conv4_1','quad')
+    conv4_2 = conv(conv4_1, 8*filter, 'conv4_2','quad')
+    conv4_3 = conv(conv4_2, 8*filter, 'conv4_3','quad')
+    pool4   = maxpool(conv4_3, 'pool4')
+
+    conv5_1 = conv(pool4, 16*filter, 'conv5_1','quad')
+    conv5_2 = conv(conv5_1, 16*filter, 'conv5_2','quad')
+    conv5_3 = conv(conv5_2, 16*filter, 'conv5_3','quad')
+    pool5   = maxpool(conv5_3, 'pool5')
+
+    shape = int(np.prod(pool5.get_shape()[1:]))
+    flatten  = tf.reshape(pool5, [-1, shape])
+    fc6      = fc(flatten, 16*filter, 'fc6','linear')
+    dropout1 = tf.nn.dropout(fc6, drop)
+
+    fc7      = fc(dropout1, 16*filter, 'fc7','linear')
+    dropout2 = tf.nn.dropout(fc7, drop)
+    
+    fc8      = fc(dropout2, n_cls, 'fc8','linear')
+
+    return fc8
+
+#datadir = '/home/featurize/data'
+#data_x, data_y = load_lidc(datadir,is_train=True, one_hot=True)
+#test_x, test_y = load_lidc(datadir,is_train=False, one_hot=True)
+
+data_x, data_y, test_x, test_y = load_CIFAR10('/home/featurize/data/cifar-10-batches-py')
+
+net_type = 'linear'
+X = tf.placeholder(dtype=tf.float32, shape=[None, 32,32,3], name='input')
+y = tf.placeholder(dtype=tf.float32, shape=[None, n_cls], name='label')
+x = tf.reshape(X,[-1,32,32,3])
+tf.summary.image('x',x,1)
+drop = tf.placeholder(tf.float32)
+if net_type == 'linear':
+    output = VGG16(x, n_cls, drop)
+elif net_type == 'quad':
+    output = QUVGG16(x, n_cls, drop)
+elif net_type == 'test':
+    output = shortVGG16(x, n_cls, drop)
+    
+prediction = tf.nn.softmax(output)
+log_dir = '/home/featurize/work/logdirs/vgg16/4quadapart/train'
+val_dir = '/home/featurize/work/logdirs/vgg16/4quadapart/test'
+with tf.name_scope('loss'):
+    err_loss = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(logits=output, labels=y))
+    tf.add_to_collection("losses", err_loss)
+    loss = tf.add_n(tf.get_collection("losses"))
+    optimizer = tf.train.AdamOptimizer(learning_rate=lr)
+    train_step= optimizer.minimize(loss)
+
+with tf.name_scope('accuracy'):
+    correct_pred = tf.equal(tf.argmax(output,1),tf.argmax(y,1))
+    accuracy = tf.reduce_mean(tf.cast(correct_pred,tf.float32))
+    
+
+tf.summary.scalar('loss',loss)
+tf.summary.scalar('accuracy',accuracy)
+merged_summary_op = tf.summary.merge_all()
+summary_writer = tf.summary.FileWriter(log_dir,graph=tf.get_default_graph())
+val_writer = tf.summary.FileWriter(val_dir,graph=tf.get_default_graph())
+
+init = tf.global_variables_initializer()
+
+with tf.Session() as sess:
+    sess.run(init)
+    for step in range(1, max_steps+1):
+        total_batch = int(len(data_x)/batch_size) 
+        for i in range(0,total_batch):
+            batch_x = data_x[i*batch_size:(i+1)*batch_size]
+            batch_y = data_y[i*batch_size:(i+1)*batch_size]
+            # Run optimization op (backprop)
+            sess.run(train_step, feed_dict={X: batch_x, y: batch_y,drop:0.8})
+            # Calculate batch loss and accuracy
+            los, acc,summary = sess.run([loss, accuracy,merged_summary_op], feed_dict={X: batch_x, y: batch_y,drop:1.0})
+            n=random.randint(0,50)
+            test_xs = test_x[n*batch_size:(n+1)*batch_size]
+            test_ys = test_y[n*batch_size:(n+1)*batch_size]
+            testaccsummary = sess.run(merged_summary_op, feed_dict={X: test_xs, y: test_ys,drop:1.0})
+            summary_writer.add_summary(summary,step*total_batch+i)
+            val_writer.add_summary(testaccsummary,step*total_batch+i)
+            if i % display_step == 0 or step == 1:
+                print("Step " + str(step) +"/"+ str(max_steps) +" , batch " + str(i) +"/"+ str(total_batch) + ", Minibatch Loss= " + \
+                  "{:.4f}".format(los) + ", Training Accuracy= " + \
+                  "{:.3f}".format(acc))
+        if step % test_steps == 0:
+                for test in range(10):
+                    n=random.randint(0,50)
+                    test_xs = test_x[n*batch_size:(n+1)*batch_size]
+                    test_ys = test_y[n*batch_size:(n+1)*batch_size]
+                    #newsummary = sess.run(merged_test_op, feed_dict={X: test_xs, y: test_ys,drop:1.0})
+                    #summary_writer.add_summary(newsummary,step)
+                    print("Testing Accuracy:", \
+                        sess.run(accuracy, feed_dict={X   : test_xs,
+                                                      y   : test_ys,
+                                                      drop:1.0 }))
+            
+    print("Optimization Finished!")
+    for i in range(10):
+        n=random.randint(0,50)
+        test_xs = test_x[n*batch_size:(n+1)*batch_size]
+        test_ys = test_y[n*batch_size:(n+1)*batch_size]
+        print("Testing Accuracy:", \
+            sess.run(accuracy, feed_dict={X   : test_xs,
+                                          y   : test_ys,
+                                          drop:1.0 }))
+print("run the tensorbord:tensorboard --logdir='/home/featurize/vgg16'")       
+
