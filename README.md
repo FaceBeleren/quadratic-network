@@ -13,7 +13,7 @@
 我们分别对比了生成器第一层，一二两层，生成器全体，判别器第一层，第二层，以及全体使用二阶网络的网络结构与初始线性结构的对比
 ### quad—vgg—net
 使用的vgg16网络结构，改变卷积层以及全连接层为二阶网络进行实验，在cifar-10数据集上的测试，二阶网络严格优于一阶\
-![线性网络准确率](https://github.com/FaceBeleren/quadratic-network/blob/master/linear_acc.png)
+![线性网络准确率](![在这里插入图片描述](https://img-blog.csdnimg.cn/20201214103838169.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L2RhdmlkMTk5NjA1MTY=,size_16,color_FFFFFF,t_70))
 ### quad-acgan——net
 对生成器于判别器分别使用了二阶网络，可以更快的生成肺结节图片数据，且对于判别器的分类作用而言，效果比一阶网络好\
 
