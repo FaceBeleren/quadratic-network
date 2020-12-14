@@ -17,3 +17,6 @@
 ### quad-acgan——net
 对生成器于判别器分别使用了二阶网络，可以更快的生成肺结节图片数据，且对于判别器的分类作用而言，效果比一阶网络好\
 
+
+[《Quadratic Autoencoder (Q-AE) for Low-dose CT Denoising》](https://arxiv.org/abs/1901.05593)
+
