@@ -1,6 +1,6 @@
 # quadratic-network
 ## 二阶网络介绍
-二阶网络是传统网络结构的一种推广形式。在《Universal Approximation with Quadratic Deep Networks》一文中指出，二阶网络的参数数量仅为同结构普通网络参数的三倍，但是表示函数的效果却优秀许多。在都使用单隐层网络结构，且拟合精确度相同的情况下，二阶网络对任一径向基函数的拟合所需要的神经元个数是参数的常数倍，而一阶段网络所需要神经元个数为指数倍。这证明了二阶网络的优越性。
+二阶网络是传统网络结构的一种推广形式。在[《Universal Approximation with Quadratic Deep Networks》](https://arxiv.org/abs/1808.00098)一文中指出，二阶网络的参数数量仅为同结构普通网络参数的三倍，但是表示函数的效果却优秀许多。在都使用单隐层网络结构，且拟合精确度相同的情况下，二阶网络对任一径向基函数的拟合所需要的神经元个数是参数的常数倍，而一阶段网络所需要神经元个数为指数倍。这证明了二阶网络的优越性。
 ## 代码介绍
 ### quad-gan-net
 从基础GAN生成对抗网络结构出发，将网络中的卷积层依次替换为二阶网络并进行实验。\
@@ -16,7 +16,5 @@
 ![线性网络准确率](https://img-blog.csdnimg.cn/20201214103838169.png?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L2RhdmlkMTk5NjA1MTY=,size_16,color_FFFFFF,t_70)
 ### quad-acgan——net
 对生成器于判别器分别使用了二阶网络，可以更快的生成肺结节图片数据，且对于判别器的分类作用而言，效果比一阶网络好\
-
-
-[《Quadratic Autoencoder (Q-AE) for Low-dose CT Denoising》](https://arxiv.org/abs/1901.05593)
+网络结构来源[《Quadratic Autoencoder (Q-AE) for Low-dose CT Denoising》](https://arxiv.org/abs/1901.05593)
 
